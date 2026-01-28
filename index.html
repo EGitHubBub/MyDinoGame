@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Dino Runner</title>
+    <style>
+        html,body{height:100%;margin:0;font-family:Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial}
+        .game-container {
+            margin: 18px auto;
+            overflow: hidden;
+            border: 0px none #ffffff;
+            background-color: #f7f7f7;
+            max-width: 95vw;
+            width: 1200px;
+            position: relative;
+        }
+
+        canvas {
+            display: block;
+            background-color: #FFFFFF;
+        }
+
+        #message-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(255, 255, 255, 0.50);
+            padding: 20px 30px;
+            text-align: center;
+            z-index: 100;
+            opacity: 0;
+            transition: opacity 0.5s;
+            width: 80%;
+            max-width: 400px;
+        }
+
+        #message-box.visible {
+            opacity: 1;
+        }
+
+        #message-box h2 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: #EF4444;
+            margin-bottom: 10px;
+            line-height: 1.15;
+        }
+
+        #message-box p {
+            font-size: 1.25rem;
+            color: #334155;
+            margin-bottom: 12px;
+            line-height: 1.5;
+        }
+
+        .button-group button {
+            display: block;
+            width: 100%;
+            margin-bottom: 10px;
+            padding: 10px 25px;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        
+        #startButton {
+            background-color: #45910c;
+            color: white;
+            border: none;
+        }
+        #startButton:hover:not(:disabled) {
+            background-color: #2563EB;
+            transform: translateY(-1px);
+        }
+        /* Scoreboard and initials modal styles */
+        #scoreboard { position: absolute; right: 12px; top: 12px; width: 320px; background: rgba(0,0,0,0.85); color: #fff; padding: 12px; border-radius: 8px; display: none; opacity: 0; transform: translateY(-6px); }
+        #scoreboard.visible { display:block; animation: scoreboardFadeIn .18s ease forwards; }
+        #scoreboard.fading { animation: scoreboardFadeOut .36s ease forwards; }
+        @keyframes scoreboardFadeIn { to { opacity: 1; transform: translateY(0); } }
+        @keyframes scoreboardFadeOut { to { opacity: 0; transform: translateY(-6px); } }
+
+        #initials-modal { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); background: #fff; padding: 14px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.18); display: none; z-index: 999; }
+        #initials-modal.visible { display:block; }
+        .initial-box { width: 40px; height: 40px; font-size: 20px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <canvas id="gameCanvas" width="1200" height="450"></canvas>
+        <div id="message-box">
+            <h2 id="message-title">Loading Assets...</h2>
+            <p id="message-text">Please wait.</p>
+            <div class="button-group">
+                <button id="startButton" onclick="startGame()" disabled>Start</button>
+            </div>
+        </div>
+        <div id="scoreboard" aria-hidden="true" role="status"></div>
+    </div>
+
+    <div id="initials-modal" role="dialog" aria-modal="true" aria-hidden="true">
+        <div><strong id="modal-title">New High Score!</strong></div>
+        <div style="margin-top:8px">
+            <input id="initial-1" maxlength="1" class="initial-box" />
+            <input id="initial-2" maxlength="1" class="initial-box" />
+            <input id="initial-3" maxlength="1" class="initial-box" />
+        </div>
+        <div style="margin-top:10px">
+            <button id="initials-submit">Submit</button>
+            <button id="initials-cancel">Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const messageBox = document.getElementById('message-box');
+        const messageTitle = document.getElementById('message-title');
+        const messageText = document.getElementById('message-text');
+        const startButton = document.getElementById('startButton');
+
+        // Game state constants
+        const GAME_STATE = { START: 'START', RUNNING: 'RUNNING', GAME_OVER: 'GAME_OVER' };
+        let gameState = GAME_STATE.START;
+
+        // Physics constants
+        const GRAVITY = 2.2;
+        const JUMP_VELOCITY = -38;
+        const GROUND_Y = canvas.height - 45; // GroundPlane.png is 45px tall
+        const INITIAL_SPEED = 11;
+        const SCORE_SPEED_INCREMENT_RATE = 0.009;
+
+        // Dino constants
+        const DINO_WIDTH = 96;
+        const DINO_HEIGHT = 96;
+        const DINO_X = 90;
+
+        // Obstacle constants
+        const MIN_SPAWN_INTERVAL = 150;
+        const MAX_SPAWN_INTERVAL = 300;
+        const FLYING_OBSTACLE_SCORE_THRESHOLD = 500;
+
+        let gameSpeed = INITIAL_SPEED;
+        let score = 0;
+        let frameCount = 0;
+        let nextObstacleFrame = 0;
+        let animationFrameId;
+        let groundX = 0;
+        // Frame-accurate scheduled extra spawns: { targetFrame: number, type: 'cactus_small'|'cactus_large' }
+        let scheduledExtraSpawns = [];
+        // Minimum gap (pixels) required between obstacles when scheduling extras
+        const MIN_EXTRA_GAP = 90;
+
+        // Asset data for obstacles
+        const ASSET_DATA = {
+            dino_sprite: 'images/dino_sprite.png',
+            cactus_small: 'images/small_cactus.png',
+            cactus_large: 'images/large_cactus.png',
+            ground: 'images/GroundPlane.png',
+            pterodactyl_sprite: 'images/Pterodactyl_sprite.png'
+        };
+
+        const assets = {};
+        let assetsLoaded = 0;
+        const assetKeys = Object.keys(ASSET_DATA);
+        const totalAssets = assetKeys.length;
+        console.log('Loading assets:', assetKeys);
+
+        function preloadAssets() {
+            messageBox.classList.add('visible');
+            messageTitle.textContent = 'Loading Assets...';
+            messageText.textContent = 'Please wait...';
+            startButton.disabled = true;
+
+            assetKeys.forEach(key => {
+                const img = new Image();
+                img.onload = () => {
+                    console.log(`Loaded asset: ${key} (${img.width}x${img.height})`);
+                    assetsLoaded++;
+                    if (assetsLoaded === totalAssets) init();
+                };
+                img.onerror = () => {
+                    console.error(`Failed to load asset: ${key} from path: ${ASSET_DATA[key]}`);
+                    messageTitle.textContent = 'Asset Error!';
+                    messageText.innerHTML = `Failed to load image <strong>${key}</strong> from ${ASSET_DATA[key]}. Please check if the file exists.`;
+                    startButton.disabled = true;
+                };
+                img.src = ASSET_DATA[key];
+                assets[key] = img;
+            });
+
+            if (totalAssets === 0) init();
+        }
+
+        class Dino {
+            constructor() {
+                this.x = DINO_X;
+                this.y = GROUND_Y - DINO_HEIGHT;
+                this.width = DINO_WIDTH;
+                this.height = DINO_HEIGHT;
+                this.vy = 0;
+                this.isJumping = false;
+                this.isDucking = false;
+                this.frameCount = 0;
+                this.runFrame = 0;
+                this.sprite = assets.dino_sprite;
+                this.spriteWidth = 96;
+                this.spriteHeight = 96;
+                this.runFrames = [0, 1];
+                this.jumpFrame = 2;
+                this.duckFrames = [3, 4];
+            }
+            jump() {
+                if (!this.isJumping && !this.isDucking && gameState === GAME_STATE.RUNNING) {
+                    this.isJumping = true; this.vy = JUMP_VELOCITY;
+                }
+            }
+            duck() {
+                if (gameState === GAME_STATE.RUNNING && !this.isJumping) {
+                    this.isDucking = true; this.height = DINO_HEIGHT / 1.5; this.y = GROUND_Y - this.height;
+                }
+            }
+            unduck() { if (this.isDucking) { this.isDucking = false; this.height = DINO_HEIGHT; this.y = GROUND_Y - this.height; } }
+            update() {
+                if (this.isJumping) {
+                    this.vy += GRAVITY; this.y += this.vy;
+                    if (this.y >= GROUND_Y - DINO_HEIGHT) { this.y = GROUND_Y - DINO_HEIGHT; this.vy = 0; this.isJumping = false; }
+                }
+                if (!this.isJumping && this.isDucking) this.y = GROUND_Y - this.height;
+                if (!this.isJumping && !this.isDucking) { this.y = GROUND_Y - DINO_HEIGHT; this.height = DINO_HEIGHT; }
+                if (gameState === GAME_STATE.RUNNING) { this.frameCount++; if (this.frameCount % 10 === 0) { if (!this.isJumping && !this.isDucking) this.runFrame = (this.runFrame + 1) % this.runFrames.length; } }
+            }
+            draw() {
+                let frameIndex = this.runFrames[this.runFrame];
+                if (this.isJumping) frameIndex = this.jumpFrame;
+                else if (this.isDucking) frameIndex = this.duckFrames[Math.floor(this.frameCount / 10) % 2];
+                const sx = frameIndex * this.spriteWidth;
+                ctx.drawImage(this.sprite, sx, 0, this.spriteWidth, this.spriteHeight, this.x, this.y, this.width, this.height);
+            }
+        }
+
+        class Obstacle {
+            constructor(type) {
+                this.type = type; this.x = canvas.width; this.isFlying = (type === 'pterodactyl_sprite');
+                if (this.isFlying) {
+                    this.asset = assets.pterodactyl_sprite; this.width = 60; this.frameWidth = 60; this.frameCount = 2; this.currentFrame = 0; this.frameTimer = 0; this.height = 60; this.y = GROUND_Y - this.height - (Math.random() * 90 + 30);
+                } else {
+                    const isLarge = (type === 'cactus_large'); this.asset = isLarge ? assets.cactus_large : assets.cactus_small; this.width = isLarge ? 45 : 30; this.height = isLarge ? 75 : 45; this.y = GROUND_Y - this.height;
+                }
+            }
+            update() { this.x -= gameSpeed; if (this.isFlying) { this.frameTimer++; if (this.frameTimer >= 15) { this.currentFrame = (this.currentFrame + 1) % this.frameCount; this.frameTimer = 0; } } }
+            draw() { if (this.isFlying) ctx.drawImage(this.asset, this.currentFrame * this.frameWidth, 0, this.frameWidth, this.height, this.x, this.y, this.width, this.height); else ctx.drawImage(this.asset, this.x, this.y, this.width, this.height); }
+        }
+
+        let dino; let obstacles = [];
+
+        function init() { dino = new Dino(); showStartScreen(); }
+
+        function resetGame() { dino = new Dino(); obstacles = []; score = 0; frameCount = 0; gameSpeed = INITIAL_SPEED; groundX = 0; nextObstacleFrame = frameCount + 100; scheduledExtraSpawns = []; }
+
+        // --- High-score / scoreboard helpers ---
+        const HIGH_SCORE_KEY = 'dino_highscores_v1';
+        let highScores = [];
+        const scoreboardEl = document.getElementById('scoreboard');
+    const initialsModal = document.getElementById('initials-modal');
+    const modalTitleEl = document.getElementById('modal-title');
+    const initialsInputs = [document.getElementById('initial-1'), document.getElementById('initial-2'), document.getElementById('initial-3')];
+        const initialsSubmit = document.getElementById('initials-submit');
+        const initialsCancel = document.getElementById('initials-cancel');
+        let _scoreboardHideTimeout = null;
+
+        function loadHighScores(){ try{ highScores = JSON.parse(localStorage.getItem(HIGH_SCORE_KEY) || '[]'); }catch(e){ highScores = []; } }
+
+        function saveHighScores(){
+            highScores.sort((a,b)=>b.score-a.score);
+            const unique = [...new Set(highScores.map(h=>h.score))];
+            if(unique.length<=3){ localStorage.setItem(HIGH_SCORE_KEY, JSON.stringify(highScores)); return; }
+            const third = unique[2];
+            const keep = highScores.filter(h=>h.score>=third);
+            localStorage.setItem(HIGH_SCORE_KEY, JSON.stringify(keep));
+        }
+
+        function qualifiesIndex(newScore){
+            loadHighScores();
+            const raw = [...highScores].sort((a,b)=>b.score-a.score);
+            const unique = [...new Set(raw.map(h=>h.score))];
+            if(raw.length===0 || unique.length<3){ const idx = raw.findIndex(h=>newScore>h.score); return idx===-1?raw.length:idx; }
+            const third = unique[2]; if(newScore<third) return -1; const idx = raw.findIndex(h=>newScore>h.score); return idx===-1?raw.length:idx;
+        }
+
+        function ordinal(n){ if(n%10===1 && n%100!==11) return n+'st'; if(n%10===2 && n%100!==12) return n+'nd'; if(n%10===3 && n%100!==13) return n+'rd'; return n+'th'; }
+        function renderScoreboard(){
+            loadHighScores();
+            if(!highScores.length){ scoreboardEl.innerHTML = '<div>No highs yet</div>'; return; }
+            const byScore = {};
+            highScores.sort((a,b)=>b.score-a.score).forEach(h=>{ (byScore[h.score]||(byScore[h.score]=[])).push(h.initials); });
+            const scores = Object.keys(byScore).map(Number).sort((a,b)=>b-a);
+            const lines = [];
+            let displayRank = 1;
+            for(const s of scores){
+                if(displayRank>3) break;
+                const initialsArr = byScore[s].filter(x=>x && x.trim());
+                if(initialsArr.length===0) continue;
+                const initials = initialsArr.join('; ');
+                const tieText = initialsArr.length>1 ? ' (TIE)' : '';
+                lines.push(`<div><strong>${ordinal(displayRank)}</strong> ${initials}${tieText} — ${s}</div>`);
+                displayRank++;
+            }
+            scoreboardEl.innerHTML = lines.join('');
+        }
+
+        function showScoreboardPositioned(){ if(_scoreboardHideTimeout){ clearTimeout(_scoreboardHideTimeout); _scoreboardHideTimeout=null; } scoreboardEl.classList.remove('fading'); scoreboardEl.style.display='block'; scoreboardEl.classList.add('visible'); scoreboardEl.setAttribute('aria-hidden','false'); window._scoreboardVisibleUntilRestart = true; renderScoreboard(); }
+
+        function hideScoreboardWithFade(duration=360){ if(_scoreboardHideTimeout){ clearTimeout(_scoreboardHideTimeout); _scoreboardHideTimeout=null; } scoreboardEl.classList.add('fading'); scoreboardEl.classList.remove('visible'); scoreboardEl.setAttribute('aria-hidden','true'); _scoreboardHideTimeout = setTimeout(()=>{ scoreboardEl.classList.remove('fading'); try{ scoreboardEl.style.display='none'; }catch(e){} _scoreboardHideTimeout=null; try{ window._scoreboardVisibleUntilRestart = false; }catch(e){} }, duration+20); }
+
+    // lightweight inert polyfill to disable background focusables while modal open
+    let _inertSaved = [];
+    let _previousActiveElement = null;
+        function setInertOnContainer(inert){ const container = document.querySelector('.game-container'); const focusables = container.querySelectorAll('a,input,button,select,textarea,[tabindex]'); if(inert){ _inertSaved = []; focusables.forEach(el=>{ _inertSaved.push({el,tab: el.hasAttribute('tabindex')?el.tabIndex:null}); el.tabIndex=-1; }); } else { _inertSaved.forEach(o=>{ if(o.tab===null) o.el.removeAttribute('tabindex'); else o.el.tabIndex = o.tab; }); _inertSaved=[]; } }
+
+        function showInitialsModalForRank(rank, newScore){
+            try{ _previousActiveElement = document.activeElement; }catch(e){}
+            setInertOnContainer(true);
+            // Set modal title based on rank: top place gets special message
+            try{
+                if(typeof rank === 'number' && rank === 0){ modalTitleEl.textContent = 'Extinction Postponed!'; }
+                else { modalTitleEl.textContent = 'New High Score!'; }
+            }catch(e){}
+            initialsModal.classList.add('visible'); initialsModal.setAttribute('aria-hidden','false');
+            initialsInputs.forEach(i=>{ i.value=''; i.removeEventListener('keydown', onInitialKeydown); i.removeEventListener('input', onInitialInput); i.addEventListener('keydown', onInitialKeydown); i.addEventListener('input', onInitialInput); });
+            initialsInputs[0].focus(); window._pendingScore = Math.floor(newScore);
+        }
+
+        function hideInitialsModal(){ try{ if(initialsModal.contains(document.activeElement)) document.activeElement.blur(); }catch(e){} setTimeout(_finishHideInitialsModal,0); }
+        function _finishHideInitialsModal(){ initialsModal.classList.remove('visible'); initialsModal.setAttribute('aria-hidden','true'); setInertOnContainer(false); try{ if(_previousActiveElement && typeof _previousActiveElement.focus === 'function') _previousActiveElement.focus(); }catch(e){} if(gameState === GAME_STATE.GAME_OVER) showScoreboardPositioned(); }
+        function onInitialInput(e){ e.target.value = (e.target.value||'').toUpperCase().slice(0,1); const next = initialsInputs.indexOf(e.target)+1; if(next<initialsInputs.length) initialsInputs[next].focus(); }
+        function onInitialKeydown(e){ if(e.key==='Enter'){ e.preventDefault(); e.stopPropagation(); submitInitials(); } else if(e.key==='Escape'){ e.preventDefault(); hideInitialsModal(); } }
+        function submitInitials(){ const initials = initialsInputs.map(i=> (i.value||' ').slice(0,1).toUpperCase()).join(''); const newEntry = { initials, score: window._pendingScore || Math.floor(score) }; loadHighScores(); const idx = qualifiesIndex(newEntry.score); if(idx===-1){ hideInitialsModal(); return; } highScores.splice(idx,0,newEntry); saveHighScores(); renderScoreboard(); hideInitialsModal(); }
+        initialsSubmit.addEventListener('click',(e)=>{ e.preventDefault(); submitInitials(); });
+        initialsCancel.addEventListener('click',(e)=>{ e.preventDefault(); hideInitialsModal(); });
+
+        // override startGame to schedule scoreboard fade after restart
+        function startGame() { if (gameState === GAME_STATE.START || gameState === GAME_STATE.GAME_OVER) { resetGame(); gameState = GAME_STATE.RUNNING; hideMessageBox(); gameLoop(); // schedule scoreboard fade 1s after restart if visible
+                setTimeout(()=>{ if(window._scoreboardVisibleUntilRestart){ hideScoreboardWithFade(360); } }, 1000);
+            } }
+
+        function gameOver() { gameState = GAME_STATE.GAME_OVER; cancelAnimationFrame(animationFrameId); showMessageBox(`Game Over!`, `Your final score was: ${Math.floor(score)}. Press **Spacebar** or the button to restart.`); startButton.textContent = 'Restart'; messageTitle.style.color = '#EF4444'; const idx = qualifiesIndex(Math.floor(score)); if(idx!==-1){ setTimeout(()=> showInitialsModalForRank(idx, score), 220); } else { setTimeout(()=> showScoreboardPositioned(), 220); } }
+
+        function showMessageBox(title, text) {
+            messageTitle.innerHTML = title; messageText.innerHTML = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>'); messageBox.classList.add('visible'); startButton.disabled = false;
+            const groundImg = assets.ground; if (groundImg) { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(groundImg, 0, GROUND_Y, groundImg.width, 45); }
+        }
+        function hideMessageBox() { messageBox.classList.remove('visible'); }
+        function showStartScreen() { showMessageBox("Dino Runner", "Press **Spacebar** or the button to Start! Use **Up Arrow** to jump, **Down Arrow** to duck."); startButton.textContent = 'Start'; messageTitle.style.color = '#3B82F6'; }
+
+        function checkCollision() {
+            const dinoRect = { x: dino.x, y: dino.y, width: dino.width, height: dino.height };
+            for (let i = 0; i < obstacles.length; i++) {
+                const obs = obstacles[i];
+                const obsRect = { x: obs.x, y: obs.y, width: obs.width, height: obs.height };
+                if (dinoRect.x < obsRect.x + obsRect.width && dinoRect.x + dinoRect.width > obsRect.x && dinoRect.y < obsRect.y + obsRect.height && dinoRect.y + dinoRect.height > obsRect.y) { gameOver(); return true; }
+            }
+            return false;
+        }
+
+        function gameLoop() {
+            if (gameState !== GAME_STATE.RUNNING) {
+                const groundImg = assets.ground; ctx.clearRect(0, 0, canvas.width, canvas.height); if (groundImg) ctx.drawImage(groundImg, 0, GROUND_Y, groundImg.width, 45); return;
+            }
+
+            animationFrameId = requestAnimationFrame(gameLoop);
+            frameCount++; score += 0.1 * gameSpeed; gameSpeed += SCORE_SPEED_INCREMENT_RATE;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const groundImg = assets.ground;
+            if (!groundImg) { ctx.fillStyle = '#9CA3AF'; ctx.fillRect(0, GROUND_Y, canvas.width, 45); }
+            else { groundX = (groundX - gameSpeed) % groundImg.width; ctx.drawImage(groundImg, groundX, GROUND_Y, groundImg.width, 45); ctx.drawImage(groundImg, groundX + groundImg.width, GROUND_Y, groundImg.width, 45); }
+
+            dino.update(); dino.draw();
+
+            if (frameCount > nextObstacleFrame) {
+                let obstacleType;
+                if (score > FLYING_OBSTACLE_SCORE_THRESHOLD && Math.random() < 0.3) obstacleType = 'pterodactyl_sprite'; else obstacleType = Math.random() < 0.5 ? 'cactus_small' : 'cactus_large';
+                obstacles.push(new Obstacle(obstacleType));
+                const baseInterval = Math.floor(MIN_SPAWN_INTERVAL + Math.random() * (MAX_SPAWN_INTERVAL - MIN_SPAWN_INTERVAL));
+                const interval = Math.floor(baseInterval / (gameSpeed / INITIAL_SPEED));
+
+                if (baseInterval > (MAX_SPAWN_INTERVAL * 0.75)) {
+                    if (gameSpeed <= INITIAL_SPEED * 1.15) {
+                        const chance = Math.min(1, (baseInterval - (MAX_SPAWN_INTERVAL * 0.75)) / (MAX_SPAWN_INTERVAL * 0.25));
+                        if (Math.random() < chance) {
+                            // Slightly larger bursts very early
+                            const extraCount = Math.random() < 0.5 ? 3 : (Math.random() < 0.6 ? 2 : 1);
+                            for (let e = 0; e < extraCount; e++) {
+                                const delayFrames = Math.floor(12 + Math.random() * 60) * (e + 1);
+                                const lastObs = obstacles.length ? obstacles[obstacles.length - 1] : null;
+                                const expectedXAtSpawn = canvas.width;
+                                if (lastObs && (lastObs.x - expectedXAtSpawn) < MIN_EXTRA_GAP) continue;
+                                // Mostly cactuses, small chance of early pterodactyl
+                                const type = Math.random() < 0.08 ? 'pterodactyl_sprite' : (Math.random() < 0.5 ? 'cactus_small' : 'cactus_large');
+                                scheduledExtraSpawns.push({ targetFrame: frameCount + delayFrames, type });
+                            }
+                        }
+                    } else if (gameSpeed <= INITIAL_SPEED * 1.5) {
+                        const chance2 = Math.min(0.6, (baseInterval - (MAX_SPAWN_INTERVAL * 0.75)) / (MAX_SPAWN_INTERVAL * 0.25) * 0.6);
+                        if (Math.random() < chance2) {
+                            const extraCount = Math.random() < 0.35 ? 2 : 1;
+                            for (let e = 0; e < extraCount; e++) {
+                                const delayFrames = Math.floor(20 + Math.random() * 70) * (e + 1);
+                                const lastObs = obstacles.length ? obstacles[obstacles.length - 1] : null;
+                                const expectedXAtSpawn = canvas.width;
+                                if (lastObs && (lastObs.x - expectedXAtSpawn) < MIN_EXTRA_GAP) continue;
+                                const type = Math.random() < 0.06 ? 'pterodactyl_sprite' : (Math.random() < 0.5 ? 'cactus_small' : 'cactus_large');
+                                scheduledExtraSpawns.push({ targetFrame: frameCount + delayFrames, type });
+                            }
+                        }
+                    }
+                }
+
+                // Independent early-stage burst: more cactuses and occasional 1-2 pterodactyls
+                if (score < 1500 && gameSpeed <= INITIAL_SPEED * 1.6) {
+                    if (Math.random() < 0.28) {
+                        const cactusBurst = 1 + Math.floor(Math.random() * 3); // 1..3 cactuses
+                        for (let b = 0; b < cactusBurst; b++) {
+                            const delayFrames = Math.floor(10 + Math.random() * 60) * (b + 1);
+                            const lastObs = obstacles.length ? obstacles[obstacles.length - 1] : null;
+                            const expectedXAtSpawn = canvas.width;
+                            if (lastObs && (lastObs.x - expectedXAtSpawn) < MIN_EXTRA_GAP) continue;
+                            scheduledExtraSpawns.push({ targetFrame: frameCount + delayFrames, type: Math.random() < 0.5 ? 'cactus_small' : 'cactus_large' });
+                        }
+                    }
+                    if (Math.random() < 0.12) {
+                        const pCount = Math.random() < 0.35 ? 2 : 1;
+                        for (let p = 0; p < pCount; p++) {
+                            const delayFrames = Math.floor(40 + Math.random() * 130) * (p + 1);
+                            const lastObs = obstacles.length ? obstacles[obstacles.length - 1] : null;
+                            const expectedXAtSpawn = canvas.width;
+                            if (lastObs && (lastObs.x - expectedXAtSpawn) < MIN_EXTRA_GAP) continue;
+                            scheduledExtraSpawns.push({ targetFrame: frameCount + delayFrames, type: 'pterodactyl_sprite' });
+                        }
+                    }
+                }
+
+                nextObstacleFrame = frameCount + interval;
+            }
+
+            if (scheduledExtraSpawns.length > 0) {
+                for (let s = scheduledExtraSpawns.length - 1; s >= 0; s--) {
+                    const item = scheduledExtraSpawns[s];
+                    if (frameCount >= item.targetFrame) {
+                        if (gameState === GAME_STATE.RUNNING) obstacles.push(new Obstacle(item.type));
+                        scheduledExtraSpawns.splice(s, 1);
+                    }
+                }
+            }
+
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                const obs = obstacles[i]; obs.update(); obs.draw(); if (obs.x + obs.width < 0) obstacles.splice(i, 1);
+            }
+
+            checkCollision();
+
+            ctx.font = '20px Inter, sans-serif'; ctx.fillStyle = '#334155'; ctx.textAlign = 'right'; ctx.fillText('Score: ' + Math.floor(score), canvas.width - 20, 30);
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (gameState !== GAME_STATE.RUNNING) startGame(); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); dino.jump(); }
+            else if (e.key === 'ArrowDown') { e.preventDefault(); dino.duck(); }
+        });
+
+        document.addEventListener('keyup', (e) => { if (e.key === 'ArrowDown') dino.unduck(); });
+
+        preloadAssets();
+    </script>
+</body>
+</html>
